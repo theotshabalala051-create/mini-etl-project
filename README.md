@@ -1,58 +1,71 @@
-# Mini ETL Project: Movies (Medallion Architecture on Databricks)
+# Mini ETL Project: Movies (Databricks)
 
-A small, end-to-end ETL pipeline that loads a CSV of movies into **Databricks** and refines it through the three layers of the **Medallion Architecture**: Bronze, Silver and Gold.
+A small, end-to-end **ETL (Extract, Transform, Load)** pipeline built in **Databricks**. A CSV of movies is read into memory, cleaned and validated *before* it is saved, and only the finished data is loaded into the Silver and Gold tables.
 
-I built this as a warm-up before tackling a larger retail sales ETL project. The dataset is deliberately tiny so the focus stays on the *pattern* rather than the data.
+I built this as a warm-up before tackling a larger retail sales ETL project. The dataset is deliberately tiny so the focus stays on the pattern rather than the data.
 
 ---
 
 ## Objectives
 
-- Ingest a raw CSV file and keep an untouched copy (Bronze)
-- Clean, type-cast and validate the data (Silver)
-- Produce analytics-ready summary tables (Gold)
-- Check data quality by comparing row counts between layers
+- **Extract** raw data from a CSV file
+- **Transform** it in memory: fix types, clean text, remove duplicates and validate rules
+- **Load** only the clean data into Silver, then build analytics-ready Gold tables
+- Keep rejected rows in a separate table so nothing disappears silently
+- Check data quality by reconciling row counts
+
+## ETL vs ELT
+
+In **ELT**, raw data is loaded into the platform first and cleaned there afterwards. In **ETL**, as in this project, the cleaning happens *before* loading, so bad rows never reach the main tables. The original CSV stays untouched in the Volume, which acts as the raw copy, so there is no Bronze table.
 
 ## Tech Stack
 
 | Tool | Purpose |
 | --- | --- |
 | Databricks | Notebook environment and compute |
-| PySpark | Reading, cleaning and writing data |
+| PySpark | Reading and transforming the data |
 | Spark SQL | Gold-layer aggregations |
-| Delta tables | Storage format for each layer |
+| Delta tables | Storage format for the loaded tables |
 
 ---
 
 ## Architecture
 
 ```
-  movies.csv
+  movies.csv  (stored untouched in a Databricks Volume)
       │
       ▼
-┌──────────────┐   Raw copy, all columns as text,
-│    BRONZE    │   plus load metadata
-│ bronze.movies│
-└──────┬───────┘
-       ▼
-┌──────────────┐   Typed, trimmed, de-duplicated,
-│    SILVER    │   validated, enriched with decade
-│ silver.movies│
-└──────┬───────┘
-       ▼
-┌─────────────────────────────┐
-│            GOLD             │
-│ gold.avg_rating_by_genre    │
-│ gold.top_rated_movies       │
-│ gold.movies_by_decade       │
-└─────────────────────────────┘
+┌───────────────────────┐
+│  EXTRACT              │  Read the CSV into memory
+└──────────┬────────────┘
+           ▼
+┌───────────────────────┐
+│  TRANSFORM            │  Fix types, trim text, remove duplicates,
+│  (in memory)          │  validate rules, add decade, split out bad rows
+└──────────┬────────────┘
+           ▼
+┌───────────────────────┐
+│  LOAD                 │  silver.movies           (clean rows)
+│                       │  silver.movies_rejected  (invalid rows)
+└──────────┬────────────┘
+           ▼
+┌───────────────────────────────┐
+│  GOLD                         │  gold.avg_rating_by_genre
+│  (built from Silver)          │  gold.top_rated_movies
+│                               │  gold.movies_by_decade
+└───────────────────────────────┘
 ```
 
-| Layer | What happens | Why |
-| --- | --- | --- |
-| **Bronze** | Load the CSV as-is (every column as text) and add `load_date` and `source_file` | Keeps a faithful record of the source so the pipeline can always be re-run from scratch |
-| **Silver** | Fix data types, trim text, remove duplicates, filter invalid rows, add a `decade` column | Creates a clean, trustworthy single source of truth |
-| **Gold** | Aggregate into business-friendly tables | Ready for dashboards and reporting |
+---
+
+## Notebooks
+
+| Notebook | Purpose |
+| --- | --- |
+| `00_debug` | Check file paths and table names, peek at the data, confirm row counts |
+| `01_extract` | Read `movies.csv` into memory. Nothing is saved yet. |
+| `02_transform` | Clean and validate the data, and separate valid rows from rejected rows |
+| `03_load` | Save the valid rows and rejected rows to Silver, then build the Gold tables |
 
 ---
 
@@ -60,7 +73,7 @@ I built this as a warm-up before tackling a larger retail sales ETL project. The
 
 `movies.csv` contains 10 movies with 5 columns:
 
-| Column | Type (Silver) | Description |
+| Column | Type (after transform) | Description |
 | --- | --- | --- |
 | `movie_id` | Integer | Unique identifier |
 | `title` | Text | Movie title |
@@ -72,9 +85,9 @@ I built this as a warm-up before tackling a larger retail sales ETL project. The
 
 ## Setup
 
-1. Sign in to Databricks and create a new Python notebook.
+1. Sign in to Databricks and create the notebooks listed above.
 2. Upload `movies.csv` to a Volume in your workspace.
-3. Create three schemas in your catalog: `bronze`, `silver` and `gold`.
+3. Create two schemas in your catalog: `silver` and `gold`.
 
 > Catalog, schema and volume names differ between workspaces, so use whatever names your workspace shows.
 
@@ -82,23 +95,25 @@ I built this as a warm-up before tackling a larger retail sales ETL project. The
 
 ## Pipeline Steps
 
-### 1. Bronze: raw ingestion
-- Read `movies.csv` with every column treated as text, so nothing is changed or lost on the way in
-- Add a `load_date` column (when the data was loaded) and a `source_file` column (where it came from)
-- Save the result as the table `bronze.movies`
+### 1. Extract
+- Read `movies.csv` from the Volume into memory
+- Keep every column as text at this stage, so nothing is changed or lost on the way in
 
-### 2. Silver: clean and validate
+### 2. Transform
 - Convert `movie_id` and `year` to integers and `rating` to a decimal
 - Trim extra spaces from `title` and `genre`
 - Remove duplicate rows based on `movie_id`
-- Drop rows that break the rules: missing ID or title, a rating outside 0-10, or an impossible release year
+- Check each row against the rules: ID and title present, rating between 0 and 10, and a realistic release year
 - Add a `decade` column (for example 1999 becomes 1990)
-- Save the result as the table `silver.movies`
+- Split the result into **valid rows** and **rejected rows**, adding a reason to each rejected row
 
-### 3. Gold: analytics tables
-- **`gold.avg_rating_by_genre`**: number of movies and average rating for each genre
-- **`gold.top_rated_movies`**: the five highest-rated movies, ranked
-- **`gold.movies_by_decade`**: number of movies and average rating for each decade
+### 3. Load
+- Save valid rows to `silver.movies`
+- Save rejected rows to `silver.movies_rejected`
+- Build the Gold tables from `silver.movies`:
+  - **`gold.avg_rating_by_genre`**: number of movies and average rating for each genre
+  - **`gold.top_rated_movies`**: the five highest-rated movies, ranked
+  - **`gold.movies_by_decade`**: number of movies and average rating for each decade
 
 ---
 
@@ -106,16 +121,16 @@ I built this as a warm-up before tackling a larger retail sales ETL project. The
 
 After running the pipeline, I confirm that:
 
-- The Bronze row count matches the number of rows in the source file
-- The Silver row count is equal to or lower than Bronze, and I can explain any difference
-- Silver has no duplicate `movie_id` values
-- Silver has no missing values in `movie_id`, `title` or `rating`
+- Rows extracted = rows in `silver.movies` + rows in `silver.movies_rejected`
+- `silver.movies` has no duplicate `movie_id` values
+- `silver.movies` has no missing values in `movie_id`, `title` or `rating`
+- Every rejected row has a reason recorded
 
 ---
 
 ## Expected Results
 
-With the provided 10-row file, every row passes validation, so Bronze and Silver both contain **10 rows**.
+With the provided 10-row file, every row passes validation, so `silver.movies` contains **10 rows** and `silver.movies_rejected` is empty.
 
 **Gold: average rating by genre (top rows)**
 
@@ -141,23 +156,26 @@ With the provided 10-row file, every row passes validation, so Bronze and Silver
 
 ```
 mini-etl-project/
-├── movies.csv       # source data
-├── README.md        # this file
-└── notebook/        # exported Databricks notebook
+├── movies.csv
+├── README.md
+└── notebooks/
+    ├── 00_debug
+    ├── 01_extract
+    ├── 02_transform
+    └── 03_load
 ```
 
 ## Ideas for Extending It
 
-- Add a few deliberately messy rows to `movies.csv` (blank titles, a rating of 15, a duplicated `movie_id`, extra spaces) and watch Silver clean or reject them
-- Save rejected rows to a separate table instead of silently dropping them
+- Add a few deliberately messy rows to `movies.csv` (blank titles, a rating of 15, a duplicated `movie_id`, extra spaces) and check that they end up in `silver.movies_rejected` with the right reason
 - Load new data incrementally instead of overwriting
-- Schedule the notebook as a Databricks Job
+- Schedule the notebooks as a Databricks Job
 - Build a small dashboard on top of the Gold tables
 
 ## What I Learned
 
-- Why the raw layer is kept untouched and what each later layer adds
-- How data moves from raw to clean to analytics-ready
+- The difference between ETL and ELT, and where the cleaning happens in each
+- How to validate data before loading it and keep rejected rows for review
 - How to verify a pipeline by reconciling row counts
 
 ---
