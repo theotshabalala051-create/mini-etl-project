@@ -162,5 +162,5 @@ mini-etl-project/
 
 ---
 
-**Author:** *your name*  
+**Author:** Theo ML Tshabalala  
 **Date:** October 2026
